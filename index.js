@@ -20,9 +20,82 @@ const client = createClient({
   host: "preview.contentful.com",
 });
 
+// Extracts searchable string content from different field types (string, rich text, localized fields)
+const extractStringContent = (fieldValue, fieldName, locale) => {
+  // Case 1: Direct string
+  if (typeof fieldValue === "string") {
+    console.log(`  Direct string value found (non-localized field)`);
+    return fieldValue;
+  }
+
+  // Case 2: Rich text (non-localized)
+  if (
+    fieldValue &&
+    typeof fieldValue === "object" &&
+    !Array.isArray(fieldValue) &&
+    fieldValue.nodeType &&
+    fieldValue.content
+  ) {
+    console.log(`  Rich Text field detected`);
+    try {
+      return documentToPlainTextString(fieldValue);
+    } catch (error) {
+      console.log(
+        `  ⚠️ Error converting Rich Text to plain text: ${error.message}`
+      );
+      return null;
+    }
+  }
+
+  // Case 3: Localized field
+  if (
+    fieldValue &&
+    typeof fieldValue === "object" &&
+    !Array.isArray(fieldValue)
+  ) {
+    // Check if the field has the specified locale
+    console.log(
+      `  Checking if field "${fieldName}" has locale "${locale}": ${
+        locale in fieldValue
+      }`
+    );
+    if (locale in fieldValue) {
+      const value = fieldValue[locale];
+
+      // Case 3a: Localized rich text
+      if (
+        value &&
+        typeof value === "object" &&
+        value.nodeType &&
+        value.content
+      ) {
+        console.log(
+          `  Localized Rich Text field detected in locale "${locale}"`
+        );
+        try {
+          return documentToPlainTextString(value);
+        } catch (error) {
+          console.log(
+            `  ⚠️ Error converting Rich Text to plain text: ${error.message}`
+          );
+          return null;
+        }
+      }
+
+      // Case 3b: Localized string
+      if (typeof value === "string") {
+        return value;
+      }
+    }
+  }
+
+  return null;
+};
+
 const entryLink = (id) =>
   `https://app.contentful.com/spaces/${SPACE_ID}/environments/${ENVIRONMENT_ID}/entries/${id}`;
 
+// Snippet maker hack
 const makeSnippet = (txt, i) => {
   const pre = txt.slice(Math.max(0, i - 30), i);
   const post = txt.slice(i + term.length, i + term.length + 30);
@@ -32,35 +105,7 @@ const makeSnippet = (txt, i) => {
 };
 
 const processStringValue = (entry, fieldName, value, rows) => {
-  console.log(
-    `Searching for exact term: "${term}" in value: "${value.substring(0, 50)}${
-      value.length > 50 ? "..." : ""
-    }"`
-  );
-
-  // Show character-by-character comparison if there's a case-insensitive match
-  const lowerValue = value.toLowerCase();
-  const lowerTerm = term.toLowerCase();
-  const possibleMatch = lowerValue.indexOf(lowerTerm);
-
-  if (possibleMatch !== -1) {
-    const actualChars = value.substring(
-      possibleMatch,
-      possibleMatch + term.length
-    );
-    console.log(`DEBUG - Term vs. characters at position ${possibleMatch}:`);
-    console.log(`Search term: "${term}"`);
-    console.log(`Field chars: "${actualChars}"`);
-
-    // Create a visual comparison showing exact differences
-    let diffMarker = "";
-    for (let i = 0; i < term.length; i++) {
-      diffMarker += term[i] === actualChars[i] ? " " : "^";
-    }
-    if (diffMarker.trim()) {
-      console.log(`Difference:   ${diffMarker}`);
-    }
-  }
+  // console.log(`Checking field "${fieldName}" for term: "${term}"`);
 
   const idx = value.indexOf(term); // case-sensitive check
   if (idx !== -1) {
@@ -91,17 +136,9 @@ const processStringValue = (entry, fieldName, value, rows) => {
     return true;
   } else {
     console.log(`❌ NO MATCH (case-sensitive comparison)`);
-    // Check if it would match case-insensitive to help debug
-    if (possibleMatch !== -1) {
-      console.log(
-        `⚠️  Would match if case-insensitive at position ${possibleMatch}`
-      );
-      console.log(
-        `  Case mismatch: "${term}" vs "${value.substring(
-          possibleMatch,
-          possibleMatch + term.length
-        )}"`
-      );
+    // Simple note if there would be a case-insensitive match
+    if (value.toLowerCase().includes(term.toLowerCase())) {
+      console.log(`⚠️  Would match if case-insensitive`);
     }
     return false;
   }
@@ -114,13 +151,12 @@ const processStringValue = (entry, fieldName, value, rows) => {
     rows = [];
 
   do {
-    // Log the search parameters
-    console.log(
-      `Searching for entries with query: "${term}" in locale: "${locale}"`
-    );
-    console.log(
-      `Using Preview API with Space: ${SPACE_ID}, Environment: ${ENVIRONMENT_ID}`
-    );
+    // console.log(
+    //   `Searching for entries with query: "${term}" in locale: "${locale}"`
+    // );
+    // console.log(
+    //   `Using Preview API with Space: ${SPACE_ID}, Environment: ${ENVIRONMENT_ID}`
+    // );
 
     // Use the Content Delivery API's full-text search functionality
     const { items, total: t } = await client.getEntries({
@@ -175,168 +211,49 @@ const processStringValue = (entry, fieldName, value, rows) => {
           )}`
         );
 
-        // Handle different field types and structures
-        let value;
+        // Extract string content from the field
+        const value = extractStringContent(fieldValue, fieldName, locale);
 
-        // Case 1: Field is directly a string (non-localized field or default locale)
-        if (typeof fieldValue === "string") {
-          console.log(`  Direct string value found (non-localized field)`);
-          value = fieldValue;
-
-          // Log the value to see what we're checking
+        if (value) {
           console.log(
-            `  Direct value preview: "${value.substring(0, 50)}${
-              value.length > 50 ? "..." : ""
-            }"`
+            `Checking field "${fieldName}" with value: "${value.substring(
+              0,
+              50
+            )}${value.length > 50 ? "..." : ""}"`
           );
 
-          // Process this direct value
-          processStringValue(e, fieldName, value, rows);
-          continue;
-        }
-        // Case 2: Field is an object with locale keys or a rich text field
-        else if (
-          fieldValue &&
-          typeof fieldValue === "object" &&
-          !Array.isArray(fieldValue)
-        ) {
-          // Check if it's a Rich Text field (has a 'nodeType' and 'content' properties)
-          if (fieldValue.nodeType && fieldValue.content) {
-            console.log(`  Rich Text field detected`);
-            try {
-              // Convert Rich Text to plain text
-              const plainText = documentToPlainTextString(fieldValue);
-              console.log(
-                `  Converted Rich Text to plain text: "${plainText.substring(
-                  0,
-                  50
-                )}${plainText.length > 50 ? "..." : ""}"`
-              );
-              processStringValue(e, fieldName, plainText, rows);
-            } catch (error) {
-              console.log(
-                `  ⚠️ Error converting Rich Text to plain text: ${error.message}`
-              );
-            }
-            continue;
-          }
-          // Check if the field has the specified locale
-          console.log(
-            `  Checking if field "${fieldName}" has locale "${locale}": ${
-              locale in fieldValue
-            }`
-          );
-          if (locale in fieldValue) {
-            const value = fieldValue[locale];
+          const idx = value.indexOf(term); // case-sensitive check
 
-            // If it's a rich text field inside a localized field
-            if (
-              value &&
-              typeof value === "object" &&
-              value.nodeType &&
-              value.content
-            ) {
-              console.log(
-                `  Localized Rich Text field detected in locale "${locale}"`
-              );
-              try {
-                // Convert Rich Text to plain text
-                const plainText = documentToPlainTextString(value);
-                console.log(
-                  `  Converted Rich Text to plain text: "${plainText.substring(
-                    0,
-                    50
-                  )}${plainText.length > 50 ? "..." : ""}"`
-                );
-                processStringValue(e, fieldName, plainText, rows);
-              } catch (error) {
-                console.log(
-                  `  ⚠️ Error converting Rich Text to plain text: ${error.message}`
-                );
-              }
-              continue;
-            }
-            // Handle regular string values
-            else if (typeof value === "string") {
-              // Log the value with better visibility for comparison
-              console.log(
-                `Checking field "${fieldName}" with value: "${value.substring(
-                  0,
-                  50
-                )}${value.length > 50 ? "..." : ""}"`
-              );
-              console.log(`Searching for exact term: "${term}"`);
+          if (idx !== -1) {
+            console.log(`✅ MATCH FOUND at position ${idx}`);
 
-              // For better diagnostics, show a character-by-character comparison of the first occurrence
-              // of something similar to the search term
-              const lowerValue = value.toLowerCase();
-              const lowerTerm = term.toLowerCase();
-              const possibleMatch = lowerValue.indexOf(lowerTerm);
+            // Show context around the match to make it clear why it matched
+            const start = Math.max(0, idx - 30);
+            const end = Math.min(value.length, idx + term.length + 30);
+            const context =
+              value.substring(start, idx) +
+              "[" +
+              value.substring(idx, idx + term.length) +
+              "]" +
+              value.substring(idx + term.length, end);
+            console.log(
+              `  Context: ${start > 0 ? "..." : ""}${context}${
+                end < value.length ? "..." : ""
+              }`
+            );
 
-              if (possibleMatch !== -1) {
-                const actualChars = value.substring(
-                  possibleMatch,
-                  possibleMatch + term.length
-                );
-                console.log(`DEBUG - Term vs. actual characters in field:`);
-                console.log(`Search term: "${term}"`);
-                console.log(`Field chars: "${actualChars}"`);
-
-                // Create a visual comparison showing exact differences
-                let diffMarker = "";
-                for (let i = 0; i < term.length; i++) {
-                  diffMarker += term[i] === actualChars[i] ? " " : "^";
-                }
-                if (diffMarker.trim()) {
-                  console.log(`Difference:   ${diffMarker}`);
-                }
-              }
-
-              const idx = value.indexOf(term); // case-sensitive check
-
-              if (idx !== -1) {
-                console.log(`✅ MATCH FOUND at position ${idx}`);
-
-                // Show context around the match to make it clear why it matched
-                const start = Math.max(0, idx - 30);
-                const end = Math.min(value.length, idx + term.length + 30);
-                const context =
-                  value.substring(start, idx) +
-                  "[" +
-                  value.substring(idx, idx + term.length) +
-                  "]" +
-                  value.substring(idx + term.length, end);
-                console.log(
-                  `  Context: ${start > 0 ? "..." : ""}${context}${
-                    end < value.length ? "..." : ""
-                  }`
-                );
-
-                rows.push({
-                  id: e.sys.id,
-                  fieldName,
-                  link: entryLink(e.sys.id),
-                  snippet: makeSnippet(value, idx),
-                });
-                break;
-              } else {
-                console.log(`❌ NO MATCH (case-sensitive comparison)`);
-                // Check if it would match case-insensitive to help debug
-                if (value.toLowerCase().includes(term.toLowerCase())) {
-                  const lowerValue = value.toLowerCase();
-                  const lowerTerm = term.toLowerCase();
-                  const insensitivePos = lowerValue.indexOf(lowerTerm);
-                  console.log(
-                    `⚠️  Would match if case-insensitive at position ${insensitivePos}`
-                  );
-                  console.log(
-                    `  Case mismatch: "${term}" vs "${value.substring(
-                      insensitivePos,
-                      insensitivePos + term.length
-                    )}"`
-                  );
-                }
-              }
+            rows.push({
+              id: e.sys.id,
+              fieldName,
+              link: entryLink(e.sys.id),
+              snippet: makeSnippet(value, idx),
+            });
+            break;
+          } else {
+            console.log(`❌ NO MATCH (case-sensitive comparison)`);
+            // Simple note if there would be a case-insensitive match
+            if (value.toLowerCase().includes(term.toLowerCase())) {
+              console.log(`⚠️  Would match if case-insensitive`);
             }
           }
         }
